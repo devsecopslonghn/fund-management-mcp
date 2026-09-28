@@ -13,7 +13,8 @@ WORKDIR /app
 ENV NODE_ENV=production
 
 COPY package.json ./
-RUN npm install --omit=dev && npm cache clean --force
+RUN npm install --omit=dev     && npm cache clean --force     && rm -rf /usr/local/lib/node_modules/npm     && rm -f /usr/local/bin/npm /usr/local/bin/npx
+
 COPY --from=build /app/dist ./dist
 
 USER node
