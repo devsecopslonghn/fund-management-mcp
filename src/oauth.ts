@@ -1,5 +1,10 @@
-import { createPublicKey, verify as verifySignature } from "node:crypto";
+import {
+  createPublicKey,
+  verify as verifySignature,
+  type JsonWebKey
+} from "node:crypto";
 import type { NextFunction, Request, Response } from "express";
+import type { AuthInfo } from "@modelcontextprotocol/server";
 import type { Config } from "./config.js";
 
 type JwtHeader = {
@@ -16,18 +21,15 @@ type JwtPayload = {
   scope?: string;
   scp?: string[] | string;
   sub?: string;
+  client_id?: string;
+  azp?: string;
   [key: string]: unknown;
 };
 
-type Jwk = {
+type Jwk = JsonWebKey & {
   kid?: string;
-  kty?: string;
   alg?: string;
   use?: string;
-  n?: string;
-  e?: string;
-  x5c?: string[];
-  [key: string]: unknown;
 };
 
 type OidcMetadata = {
@@ -93,7 +95,7 @@ function audienceMatches(aud: JwtPayload["aud"], expected: string): boolean {
     : Array.isArray(aud) && aud.includes(expected);
 }
 
-function tokenScopes(payload: JwtPayload): Set<string> {
+function tokenScopes(payload: JwtPayload): string[] {
   const result = new Set<string>();
   if (typeof payload.scope === "string") {
     for (const scope of payload.scope.split(/\s+/).filter(Boolean)) result.add(scope);
@@ -103,28 +105,34 @@ function tokenScopes(payload: JwtPayload): Set<string> {
   } else if (typeof payload.scp === "string") {
     for (const scope of payload.scp.split(/\s+/).filter(Boolean)) result.add(scope);
   }
-  return result;
+  return [...result];
 }
 
-export type VerifiedAccessToken = {
-  payload: JwtPayload;
-  scopes: Set<string>;
-};
+async function signingKey(header: JwtHeader, config: Config): Promise<Jwk> {
+  if (!header.kid) throw new Error("Access token is missing kid");
 
-export async function verifyAccessToken(
-  token: string,
-  config: Config,
-  requiredScopes: string[],
-): Promise<VerifiedAccessToken> {
+  let keys = await getJwks(config);
+  let key = keys.find((candidate) => candidate.kid === header.kid);
+  if (!key) {
+    jwksCache = undefined;
+    keys = await getJwks(config);
+    key = keys.find((candidate) => candidate.kid === header.kid);
+  }
+  if (!key) throw new Error("No signing key matches access token kid");
+  return key;
+}
+
+export async function verifyAccessToken(token: string, config: Config): Promise<AuthInfo> {
   const parts = token.split(".");
   if (parts.length !== 3) throw new Error("Malformed access token");
 
-  const [encodedHeader, encodedPayload, encodedSignature] = parts;
+  const encodedHeader = parts[0]!;
+  const encodedPayload = parts[1]!;
+  const encodedSignature = parts[2]!;
   const header = parseJsonPart<JwtHeader>(encodedHeader);
   const payload = parseJsonPart<JwtPayload>(encodedPayload);
 
   if (header.alg !== "RS256") throw new Error("Unsupported access-token signing algorithm");
-  if (!header.kid) throw new Error("Access token is missing kid");
   if (payload.iss !== config.OAUTH_ISSUER) throw new Error("Access token issuer mismatch");
   if (!audienceMatches(payload.aud, config.OAUTH_AUDIENCE)) throw new Error("Access token audience mismatch");
 
@@ -132,63 +140,50 @@ export async function verifyAccessToken(
   if (!payload.exp || payload.exp <= now) throw new Error("Access token expired");
   if (payload.nbf && payload.nbf > now + 30) throw new Error("Access token is not active yet");
 
-  const keys = await getJwks(config);
-  const jwk = keys.find((candidate) => candidate.kid === header.kid);
-  if (!jwk) {
-    jwksCache = undefined;
-    const refreshed = await getJwks(config);
-    const rotated = refreshed.find((candidate) => candidate.kid === header.kid);
-    if (!rotated) throw new Error("No signing key matches access token kid");
-    const key = createPublicKey({ key: rotated as JsonWebKey, format: "jwk" });
-    const ok = verifySignature("RSA-SHA256", Buffer.from(`${encodedHeader}.${encodedPayload}`), key, decodeBase64Url(encodedSignature));
-    if (!ok) throw new Error("Invalid access-token signature");
-  } else {
-    const key = createPublicKey({ key: jwk as JsonWebKey, format: "jwk" });
-    const ok = verifySignature("RSA-SHA256", Buffer.from(`${encodedHeader}.${encodedPayload}`), key, decodeBase64Url(encodedSignature));
-    if (!ok) throw new Error("Invalid access-token signature");
-  }
+  const jwk = await signingKey(header, config);
+  const key = createPublicKey({ key: jwk, format: "jwk" });
+  const valid = verifySignature(
+    "RSA-SHA256",
+    Buffer.from(`${encodedHeader}.${encodedPayload}`),
+    key,
+    decodeBase64Url(encodedSignature),
+  );
+  if (!valid) throw new Error("Invalid access-token signature");
 
-  const scopes = tokenScopes(payload);
-  const missing = requiredScopes.filter((scope) => !scopes.has(scope));
-  if (missing.length > 0) throw new Error(`Missing required scope: ${missing.join(" ")}`);
-
-  return { payload, scopes };
+  return {
+    token,
+    clientId: payload.client_id ?? payload.azp ?? payload.sub ?? "unknown-client",
+    scopes: tokenScopes(payload),
+    expiresAt: payload.exp,
+    resource: new URL(config.MCP_PUBLIC_BASE_URL),
+    resourceMetadataUrl: new URL(`${config.MCP_PUBLIC_BASE_URL}/.well-known/oauth-protected-resource`),
+    extra: { sub: payload.sub }
+  };
 }
 
-export function scopeForRequest(req: Request): string[] {
-  if (req.body?.method === "tools/call") {
-    const toolName = req.body?.params?.name;
-    if (toolName === "create_manual_bank_transaction") return ["transaction.write"];
-    if (toolName === "reconcile_bank_transaction") return ["reconciliation.write"];
-  }
-  return ["fund.read"];
-}
-
-export function oauthChallenge(config: Config, scope = "fund.read"): string {
-  return `Bearer resource_metadata="${config.MCP_PUBLIC_BASE_URL}/.well-known/oauth-protected-resource", scope="${scope}"`;
+export function oauthChallenge(config: Config): string {
+  const scopes = ["fund.read", "transaction.write", "reconciliation.write"].join(" ");
+  return `Bearer resource_metadata="${config.MCP_PUBLIC_BASE_URL}/.well-known/oauth-protected-resource", scope="${scopes}"`;
 }
 
 export function oauthMiddleware(config: Config) {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     const auth = req.header("authorization");
     if (!auth?.startsWith("Bearer ")) {
-      const scope = scopeForRequest(req).join(" ");
-      res.setHeader("WWW-Authenticate", oauthChallenge(config, scope));
-      res.status(401).json({ error: "unauthorized" });
+      res.setHeader("WWW-Authenticate", oauthChallenge(config));
+      res.status(401).json({
+        error: "invalid_token",
+        error_description: "Bearer token required"
+      });
       return;
     }
 
     try {
-      const requiredScopes = scopeForRequest(req);
-      const verified = await verifyAccessToken(auth.slice("Bearer ".length), config, requiredScopes);
-      res.locals.oauth = {
-        sub: verified.payload.sub,
-        scopes: [...verified.scopes],
-      };
+      const authInfo = await verifyAccessToken(auth.slice("Bearer ".length), config);
+      (req as Request & { auth?: AuthInfo }).auth = authInfo;
       next();
     } catch (error) {
-      const scope = scopeForRequest(req).join(" ");
-      res.setHeader("WWW-Authenticate", oauthChallenge(config, scope));
+      res.setHeader("WWW-Authenticate", oauthChallenge(config));
       res.status(401).json({
         error: "invalid_token",
         error_description: error instanceof Error ? error.message : "Access token rejected",
