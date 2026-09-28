@@ -9,13 +9,74 @@ permissions:
   contents: read
 
 jobs:
-  validate:
+  build:
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+    uses: devsecopslonghn/.github/.github/workflows/node-container.yml@9dce2f58f486a6bfb0a0d25c1ad901aaa342d0df
+    with:
+      node_version: "22"
+      install_command: npm install
+      npm_cache: false
+      quality_command: npm run typecheck
+      build_command: npm run build
+      image_name: ghcr.io/devsecopslonghn/fund-management-mcp
+      dockerfile: Dockerfile
+      publish_image: ${{ github.event_name != 'pull_request' }}
+
+  update-gitops:
+    needs: build
+    if: ${{ github.event_name == 'push' && !contains(github.event.head_commit.message, '[skip ci]') }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      RELEASE_BRANCH: release/mcp-${{ github.sha }}
+      IMAGE_REPOSITORY: ghcr.io/devsecopslonghn/fund-management-mcp
+      IMAGE_TAG: ${{ github.sha }}@${{ needs.build.outputs.digest }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Validate immutable release output
+        run: |
+          [[ "$IMAGE_TAG" =~ ^[a-f0-9]{40}@sha256:[a-f0-9]{64}$ ]]
+
+      - name: Checkout Helm chart
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          node-version: "22"
-      - run: npm install
-      - run: npm run typecheck
-      - run: npm run build
+          repository: devsecopslonghn/fund-management-helm-chart
+          ref: master
+          token: ${{ secrets.GITOPS_TOKEN }}
+          path: chart
+
+      - name: Open immutable GitOps update
+        working-directory: chart
+        env:
+          GH_TOKEN: ${{ secrets.GITOPS_TOKEN }}
+        run: |
+          set -euo pipefail
+          existing=$(gh pr list --repo devsecopslonghn/fund-management-helm-chart --head "$RELEASE_BRANCH" --state open --json url --jq '.[0].url // empty')
+          if test -n "$existing"; then echo "Existing release PR: $existing"; exit 0; fi
+          git switch -c "$RELEASE_BRANCH"
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+          path = Path("values.yaml")
+          text = path.read_text()
+          match = re.search(r"(?ms)^mcp:\n.*\Z", text)
+          if not match:
+              raise SystemExit("mcp values block was not found")
+          block = match.group(0)
+          block, repo_count = re.subn(r"(?m)^    repository:.*$", f"    repository: {os.environ['IMAGE_REPOSITORY']}", block, count=1)
+          block, tag_count = re.subn(r"(?m)^    tag:.*$", f"    tag: {os.environ['IMAGE_TAG']}", block, count=1)
+          if repo_count != 1 or tag_count != 1:
+              raise SystemExit("mcp image reference was not updated exactly once")
+          path.write_text(text[:match.start()] + block)
+          PY
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add values.yaml
+          git diff --cached --quiet && { echo 'Chart already references this digest'; exit 0; }
+          git commit -m "chore(gitops): deploy mcp $GITHUB_SHA [skip ci]"
+          git push origin "HEAD:$RELEASE_BRANCH"
+          gh pr create --repo devsecopslonghn/fund-management-helm-chart --base master --head "$RELEASE_BRANCH" --title "chore(gitops): deploy mcp $GITHUB_SHA" --body "Deploy the exact CI-scanned MCP image: $IMAGE_TAG."
