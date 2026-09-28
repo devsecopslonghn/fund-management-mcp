@@ -1,0 +1,29 @@
+{
+  "name": "fund-management-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "MCP adapter for the Fund Management backend",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "start": "node dist/src/index.js",
+    "start:stdio": "MCP_TRANSPORT=stdio node dist/src/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/node": "2.1.0",
+    "@modelcontextprotocol/server": "2.1.0",
+    "express": "5.1.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/express": "5.0.3",
+    "@types/node": "24.5.2",
+    "tsx": "4.20.5",
+    "typescript": "^6.0.0",
+    "vitest": "3.2.4"
+  }
+}
