@@ -7,6 +7,15 @@ export class FundApiError extends Error {
   }
 }
 
+export type ManualBankTransaction = {
+  occurredAt: string;
+  amount: number;
+  direction: "IN" | "OUT";
+  accountNumber?: string;
+  parsedContent: string;
+  availableBalance?: number;
+};
+
 export class FundApiClient {
   private readonly authorization: string;
 
@@ -16,21 +25,39 @@ export class FundApiClient {
     ).toString("base64")}`;
   }
 
-  private async request<T>(method: string, path: string, authenticated = true): Promise<T> {
+  private async request<T>(
+    method: "GET" | "POST",
+    path: string,
+    body?: unknown,
+    authenticated = true,
+  ): Promise<T> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.config.FUND_API_TIMEOUT_MS);
+
     try {
       const response = await fetch(`${this.config.FUND_API_BASE_URL}${path}`, {
         method,
         signal: controller.signal,
         headers: {
           Accept: "application/json",
+          ...(body === undefined ? {} : { "Content-Type": "application/json" }),
           ...(authenticated ? { Authorization: this.authorization } : {})
-        }
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) })
       });
+
       if (!response.ok) {
-        throw new FundApiError(response.status, `Fund API returned HTTP ${response.status}`);
+        let message = `Fund API returned HTTP ${response.status}`;
+        try {
+          const payload = (await response.json()) as { message?: string; error?: string };
+          message = payload.message ?? payload.error ?? message;
+        } catch {
+          // Do not forward arbitrary upstream response bodies.
+        }
+        throw new FundApiError(response.status, message);
       }
+
+      if (response.status === 204) return undefined as T;
       return (await response.json()) as T;
     } catch (error) {
       if (error instanceof FundApiError) throw error;
@@ -61,6 +88,7 @@ export class FundApiClient {
     return this.request<Record<string, unknown>>(
       "GET",
       `/public/payment-history?${query.toString()}`,
+      undefined,
       false,
     );
   }
@@ -83,5 +111,24 @@ export class FundApiClient {
 
   gmailHealth() {
     return this.request<Record<string, unknown>>("GET", "/admin/gmail/health");
+  }
+
+  createManualTransaction(input: ManualBankTransaction) {
+    return this.request<Record<string, unknown>>(
+      "POST",
+      "/admin/reconciliation/manual",
+      input,
+    );
+  }
+
+  reviewTransaction(
+    transactionId: string,
+    input: { ignore: boolean; memberId?: string; note?: string },
+  ) {
+    return this.request<Record<string, unknown>>(
+      "POST",
+      `/admin/reconciliation/${encodeURIComponent(transactionId)}/review`,
+      input,
+    );
   }
 }
