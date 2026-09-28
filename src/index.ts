@@ -4,6 +4,7 @@ import { toNodeHandler } from "@modelcontextprotocol/node";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { loadConfig } from "./config.js";
 import { buildMcp } from "./mcp.js";
+import { oauthMiddleware } from "./oauth.js";
 
 const config = loadConfig();
 
@@ -14,10 +15,28 @@ if (config.MCP_TRANSPORT === "stdio") {
   app.use(express.json({ limit: "1mb" }));
 
   app.get("/healthz", (_req, res) => {
-    res.status(200).json({ status: "ok" });
+    res.status(200).json({ status: "ok", authMode: config.MCP_AUTH_MODE });
   });
 
-  const authorize = (req: Request, res: Response, next: NextFunction) => {
+  app.get("/.well-known/oauth-protected-resource", (_req, res) => {
+    if (config.MCP_AUTH_MODE !== "oauth") {
+      res.status(404).json({ error: "oauth_not_enabled" });
+      return;
+    }
+
+    res.status(200).json({
+      resource: config.MCP_PUBLIC_BASE_URL,
+      authorization_servers: [config.OAUTH_ISSUER],
+      scopes_supported: [
+        "fund.read",
+        "transaction.write",
+        "reconciliation.write"
+      ],
+      resource_documentation: "https://github.com/devsecopslonghn/fund-management-mcp"
+    });
+  });
+
+  const staticAuthorize = (req: Request, res: Response, next: NextFunction) => {
     const expected = `Bearer ${config.MCP_BEARER_TOKEN}`;
     if (req.header("authorization") !== expected) {
       res.status(401).json({ error: "unauthorized" });
@@ -25,6 +44,10 @@ if (config.MCP_TRANSPORT === "stdio") {
     }
     next();
   };
+
+  const authorize = config.MCP_AUTH_MODE === "oauth"
+    ? oauthMiddleware(config)
+    : staticAuthorize;
 
   const handler = toNodeHandler(
     createMcpHandler(() => buildMcp(config), { legacy: "stateless" }),
@@ -36,7 +59,7 @@ if (config.MCP_TRANSPORT === "stdio") {
 
   app.listen(config.MCP_PORT, config.MCP_HOST, () => {
     console.error(
-      `fund-management-mcp listening on http://${config.MCP_HOST}:${config.MCP_PORT}/mcp`,
+      `fund-management-mcp listening on http://${config.MCP_HOST}:${config.MCP_PORT}/mcp auth=${config.MCP_AUTH_MODE}`,
     );
   });
 }

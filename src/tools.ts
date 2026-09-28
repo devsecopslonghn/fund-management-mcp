@@ -1,4 +1,4 @@
-import { McpServer } from "@modelcontextprotocol/server";
+import { McpServer, requireScopes } from "@modelcontextprotocol/server";
 import { z } from "zod/v4";
 import { FundApiClient, FundApiError } from "./fund-api.js";
 
@@ -21,6 +21,7 @@ export function registerTools(server: McpServer, api: FundApiClient): void {
     title: "Get fund summary",
     description: "Read authoritative fund balance, income, expense, compliance, and monthly series from the backend.",
     inputSchema: z.object({}),
+    scopeChallenge: requireScopes("fund.read"),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   }, async () => {
     try { return text(await api.statistics()); } catch (error) { return failure(error); }
@@ -33,6 +34,7 @@ export function registerTools(server: McpServer, api: FundApiClient): void {
       from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
       to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional()
     }),
+    scopeChallenge: requireScopes("fund.read"),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   }, async ({ from, to }) => {
     try { return text(await api.expenseReport(from, to)); } catch (error) { return failure(error); }
@@ -45,6 +47,7 @@ export function registerTools(server: McpServer, api: FundApiClient): void {
       memberCode: z.string().min(2).max(32).regex(/^[A-Za-z0-9_-]+$/),
       year: z.number().int().min(2000).max(9999).optional()
     }),
+    scopeChallenge: requireScopes("fund.read"),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   }, async ({ memberCode, year }) => {
     try { return text(await api.memberPaymentHistory(memberCode, year)); } catch (error) { return failure(error); }
@@ -57,6 +60,7 @@ export function registerTools(server: McpServer, api: FundApiClient): void {
       page: z.number().int().min(0).default(0),
       size: z.number().int().min(1).max(100).default(25)
     }),
+    scopeChallenge: requireScopes("fund.read"),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   }, async ({ page, size }) => {
     try { return text(await api.reconciliationQueue(page, size)); } catch (error) { return failure(error); }
@@ -66,6 +70,7 @@ export function registerTools(server: McpServer, api: FundApiClient): void {
     title: "Get ingestion health",
     description: "Read redacted ingestion and Gmail OAuth/polling health without exposing tokens or raw email.",
     inputSchema: z.object({}),
+    scopeChallenge: requireScopes("fund.read"),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   }, async () => {
     try {
@@ -90,6 +95,7 @@ export function registerTools(server: McpServer, api: FundApiClient): void {
       parsedContent: z.string().min(1).max(500),
       availableBalance: z.number().int().nonnegative().optional()
     }),
+    scopeChallenge: requireScopes("transaction.write"),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
   }, async ({ confirmed: _confirmed, ...input }) => {
     try { return text(await api.createManualTransaction(input)); } catch (error) { return failure(error); }
@@ -105,6 +111,7 @@ export function registerTools(server: McpServer, api: FundApiClient): void {
       memberId: z.string().min(1).max(128).optional(),
       note: z.string().max(500).optional()
     }),
+    scopeChallenge: requireScopes("reconciliation.write"),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
   }, async ({ confirmed: _confirmed, transactionId, action, memberId, note }) => {
     if (action === "MATCH" && !memberId) {
